@@ -1,0 +1,18 @@
+# Dep hygiene for the fork. Upstream is dormant (zero commits since 2024-08-21), so nothing else
+# will ever patch this Go tree -- these PRs are the whole reason no PATROL.md roster item exists
+# for the fork. The resulting image tag bump reaches the cluster through x1's daily renovate-merge
+# sweep. ⚠ gomod bumps work only because the image builds -mod=mod; see the root Dockerfile.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /.github/workflows
+    schedule:
+      interval: weekly

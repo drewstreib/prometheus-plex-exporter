@@ -1,0 +1,36 @@
+name: release
+# Push a tag vX.Y.Z -> builds the root Dockerfile for linux/amd64 + linux/arm64 and publishes
+# ghcr.io/drewstreib/prometheus-plex-exporter:vX.Y.Z. Tags are immutable; cut a new one to change
+# the image. QEMU is needed because the RUNTIME stage's `apk add` executes on the target arch (the
+# Go build itself is a cross-compile on the native builder and needs no emulation).
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/drewstreib/prometheus-plex-exporter:${{ github.ref_name }}
+          # Keeps the index to exactly two arch manifests -- no unknown/unknown attestation entries,
+          # so an arch check on the manifest list reads cleanly.
+          provenance: false
