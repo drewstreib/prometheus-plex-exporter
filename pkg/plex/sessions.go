@@ -9,7 +9,7 @@ import (
 	"github.com/jrudio/go-plex-client"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/grafana/plexporter/pkg/metrics"
+	"github.com/drewstreib/prometheus-plex-exporter/pkg/metrics"
 )
 
 type sessionState string
@@ -95,7 +95,7 @@ func (s *sessions) Update(sessionID string, newState sessionState, newSession *p
 		// If the session was playing but now is not, then flatten
 		// the play time into the total.
 		ss.prevPlayedTime += time.Since(ss.playStarted)
-		s.totalEstimatedTransmittedKBits += time.Since(ss.playStarted).Seconds() * float64(ss.session.Media[0].Bitrate)
+		s.totalEstimatedTransmittedKBits += time.Since(ss.playStarted).Seconds() * float64(bitrate(ss.session))
 	}
 
 	if ss.state != statePlaying && newState == statePlaying {
@@ -114,7 +114,7 @@ func (s *sessions) extrapolatedTransmittedBytes() float64 {
 
 	for _, ss := range s.sessions {
 		if ss.state == statePlaying {
-			total += time.Since(ss.playStarted).Seconds() * float64(ss.session.Media[0].Bitrate)
+			total += time.Since(ss.playStarted).Seconds() * float64(bitrate(ss.session))
 		}
 	}
 
@@ -155,12 +155,12 @@ func (s *sessions) Collect(ch chan<- prometheus.Metric) {
 			title,
 			season,
 			episode,
-			session.session.Media[0].Part[0].Decision,      // stream type
-			session.session.Media[0].VideoResolution,       // stream res
-			session.media.Media[0].VideoResolution,         // file res
-			strconv.Itoa(session.session.Media[0].Bitrate), // bitrate
-			session.session.Player.Device,                  // device
-			session.session.Player.Product,                 // device type
+			streamDecision(session.session),        // stream type
+			videoResolution(session.session),       // stream res
+			videoResolution(session.media),         // file res
+			strconv.Itoa(bitrate(session.session)), // bitrate
+			session.session.Player.Device,          // device
+			session.session.Player.Product,         // device type
 			session.session.User.Title,
 			id,
 		)
@@ -182,12 +182,12 @@ func (s *sessions) Collect(ch chan<- prometheus.Metric) {
 			title,
 			season,
 			episode,
-			session.session.Media[0].Part[0].Decision,      // stream type
-			session.session.Media[0].VideoResolution,       // stream res
-			session.media.Media[0].VideoResolution,         // file res
-			strconv.Itoa(session.session.Media[0].Bitrate), // bitrate
-			session.session.Player.Device,                  // device
-			session.session.Player.Product,                 // device type
+			streamDecision(session.session),        // stream type
+			videoResolution(session.session),       // stream res
+			videoResolution(session.media),         // file res
+			strconv.Itoa(bitrate(session.session)), // bitrate
+			session.session.Player.Device,          // device
+			session.session.Player.Product,         // device type
 			session.session.User.Title,
 			id,
 		)
@@ -195,6 +195,32 @@ func (s *sessions) Collect(ch chan<- prometheus.Metric) {
 
 	ch <- prometheus.MustNewConstMetric(metrics.MetricEstimatedTransmittedBytesTotal, prometheus.CounterValue, s.extrapolatedTransmittedBytes(), "plex", s.server.Name,
 		s.server.ID)
+}
+
+// ⚠ Plex reports sessions with NO Media (and Media with no Part) — live TV, transient
+// buffering states, and the stop/cleanup race. Upstream indexes [0] unguarded inside
+// Collect, which is FATAL: client_golang carries no recover() anywhere, and Gather runs
+// Collect on its own goroutine, so one such session kills the exporter on the next scrape
+// rather than returning a 500. These accessors degrade to a zero value instead.
+func bitrate(m plex.Metadata) int {
+	if len(m.Media) == 0 {
+		return 0
+	}
+	return m.Media[0].Bitrate
+}
+
+func videoResolution(m plex.Metadata) string {
+	if len(m.Media) == 0 {
+		return ""
+	}
+	return m.Media[0].VideoResolution
+}
+
+func streamDecision(m plex.Metadata) string {
+	if len(m.Media) == 0 || len(m.Media[0].Part) == 0 {
+		return ""
+	}
+	return m.Media[0].Part[0].Decision
 }
 
 func labels(m plex.Metadata) (title, season, episodeTitle string) {

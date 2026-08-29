@@ -13,8 +13,8 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/grafana/plexporter/pkg/metrics"
-	"github.com/grafana/plexporter/pkg/plex"
+	"github.com/drewstreib/prometheus-plex-exporter/pkg/metrics"
+	"github.com/drewstreib/prometheus-plex-exporter/pkg/plex"
 )
 
 const (

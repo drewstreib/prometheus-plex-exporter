@@ -1,50 +1,44 @@
-# Version number
-VERSION=$(shell ./tools/image-tag | cut -d, -f 1)
+# Ours. Upstream's Makefile built the binary on the host and shelled out to `docker tag
+# ghcr.io/jsclayton/...`; the image is now built entirely inside buildx (see ./Dockerfile),
+# so this file is only a developer convenience.
+#
+# ⚠ There is no vendor/ any more — everything builds -mod=mod so Dependabot PRs build as-is.
 
-GIT_REVISION := $(shell git rev-parse --short HEAD)
-GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
+BIN     := prometheus-plex-exporter
+IMAGE   := ghcr.io/drewstreib/prometheus-plex-exporter
+GOOS    ?= linux
+GOARCH  ?= $(shell go env GOARCH)
 
-GOOS ?= $(shell go env GOOS)
-GOARCH ?= $(shell go env GOARCH)
-
-GOPATH := $(shell go env GOPATH)
-
-GO_OPT= -mod vendor -ldflags "-X main.Branch=$(GIT_BRANCH) -X main.Revision=$(GIT_REVISION) -X main.Version=$(VERSION)"
-
-### Development
+.PHONY: build
+build:
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -mod=mod -o ./bin/$(BIN) ./cmd/$(BIN)
 
 .PHONY: run
 run:
-	go run ./cmd/prometheus-plex-exporter
+	go run ./cmd/$(BIN)
 
-### Build
+.PHONY: vet
+vet:
+	go vet ./...
 
-.PHONY: prometheus-plex-exporter
-prometheus-plex-exporter:
-	CGO_ENABLED=0 go build $(GO_OPT) -o ./bin/$(GOOS)/prometheus-plex-exporter-$(GOARCH) ./cmd/prometheus-plex-exporter
+.PHONY: test
+test:
+	go test ./...
 
-.PHONY: exe
-exe:
-	GOOS=linux $(MAKE) $(COMPONENT)
+# The security gate. The binary is statically linked, so stdlib CVEs ship unless the
+# toolchain moves — `-mode=binary` is the only check that sees the Go version we ship.
+.PHONY: vuln
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-### Docker Images
+.PHONY: vuln-binary
+vuln-binary: build
+	go run golang.org/x/vuln/cmd/govulncheck@latest -mode=binary ./bin/$(BIN)
 
-.PHONY: docker-component # Not intended to be used directly
-docker-component: check-component exe
-	docker build -t jsclayton/$(COMPONENT) --build-arg=TARGETARCH=$(GOARCH) -f ./cmd/$(COMPONENT)/Dockerfile .
-	docker tag jsclayton/$(COMPONENT) $(COMPONENT)
-	docker tag jsclayton/$(COMPONENT) ghcr.io/jsclayton/$(COMPONENT):latest
-	docker tag jsclayton/$(COMPONENT) ghcr.io/jsclayton/$(COMPONENT):main
+.PHONY: check
+check: vet test vuln
 
-.PHONY: docker-prometheus-plex-exporter
-docker-prometheus-plex-exporter:
-	COMPONENT=prometheus-plex-exporter $(MAKE) docker-component
-
-.PHONY: docker-images
-docker-images: docker-prometheus-plex-exporter
-
-.PHONY: check-component
-check-component:
-ifndef COMPONENT
-	$(error COMPONENT variable was not defined)
-endif
+# Local multi-arch build sanity (does not push).
+.PHONY: image
+image:
+	docker buildx build --platform linux/amd64,linux/arm64 -t $(IMAGE):dev .

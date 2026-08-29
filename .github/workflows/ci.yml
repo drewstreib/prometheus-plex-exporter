@@ -1,9 +1,16 @@
 name: CI
-
+# Ours, replacing upstream's. Differences that matter: builds -mod=mod (no vendor/ any more),
+# and gates on govulncheck -- both source mode and BINARY mode. Binary mode is the one that
+# catches an ageing Go toolchain: the exporter is statically linked, so every net/http and
+# crypto/x509 fix ships only by rebuilding, and upstream's go1.23 shipped 26 reachable stdlib
+# CVEs that source-mode scanning alone would never have shown.
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Catches newly-disclosed CVEs in code that has not changed.
+    - cron: '17 6 * * 1'
 
 permissions:
   contents: read
@@ -14,47 +21,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
+        goarch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-go@v5
-      with:
-        go-version: 1.23.0
-        cache: false
-    - run: go build -mod vendor -o ./bin/prometheus-plex-exporter ./cmd/prometheus-plex-exporter
-      env:
-        CGO_ENABLED: "0"
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-    - run: go test -exec=true ./...
-      env:
-        CGO_ENABLED: "0"
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-    - uses: actions/upload-artifact@v4
-      with:
-        name: prometheus-plex-exporter-${{ matrix.goos }}-${{ matrix.goarch}}
-        path: ./bin
-
-  release-notes:
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: write
-    steps:
-      - uses: release-drafter/release-drafter@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          disable-autolabeler: true
+          go-version-file: go.mod
+      - run: go build -mod=mod -o ./bin/prometheus-plex-exporter ./cmd/prometheus-plex-exporter
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+      - run: go vet ./...
+      - run: go test ./...
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prometheus-plex-exporter-linux-${{ matrix.goarch }}
+          path: ./bin
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck (source)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: build then govulncheck (binary — catches stdlib/toolchain CVEs)
+        run: |
+          CGO_ENABLED=0 GOOS=linux go build -mod=mod -o ./bin/prometheus-plex-exporter ./cmd/prometheus-plex-exporter
+          go run golang.org/x/vuln/cmd/govulncheck@latest -mode=binary ./bin/prometheus-plex-exporter

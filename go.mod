@@ -1,10 +1,10 @@
-module github.com/grafana/plexporter
+module github.com/drewstreib/prometheus-plex-exporter
 
-go 1.23
+go 1.27.0
 
 require (
 	github.com/go-kit/log v0.2.1
-	github.com/gorilla/websocket v1.5.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/jrudio/go-plex-client v0.0.0-20220428052413-e5b4386beb17
 	github.com/prometheus/client_golang v1.14.0
 )

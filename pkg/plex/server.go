@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/grafana/plexporter/pkg/metrics"
+	"github.com/drewstreib/prometheus-plex-exporter/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

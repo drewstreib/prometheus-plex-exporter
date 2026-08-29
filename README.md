@@ -2,6 +2,16 @@
 
 Expose library playback, storage, and host metrics in a Prometheus format.
 
+> **This is a hard fork.** It began as [jsclayton/prometheus-plex-exporter](https://github.com/jsclayton/prometheus-plex-exporter)
+> (AGPL-3.0), which has had no commits since 2024-08-21. This fork is **self-referencing and
+> independently maintained** — it does not track upstream and does not aim for upstream
+> compatibility. See [FORK.md](FORK.md) for what changed and why.
+>
+> Differences you would notice: **multi-arch images** (`linux/amd64` + `linux/arm64`; upstream is
+> amd64-only), the container **runs as non-root**, the build tracks the **current Go release** and
+> is gated on `govulncheck` in both source and binary modes, and several **panic-on-scrape** crashes
+> are fixed.
+
 # Configuration
 
 The exporter is configured via required environment variables:
@@ -15,18 +25,18 @@ The exporter runs via Docker:
 
 ```bash
 docker run \
-  -name prom-plex-exporter \
+  --name prom-plex-exporter \
   -p 9000:9000 \
   -e PLEX_SERVER="<Your Plex server URL>" \
   -e PLEX_TOKEN="<Your Plex server admin token>" \
-  ghcr.io/jsclayton/prometheus-plex-exporter
+  ghcr.io/drewstreib/prometheus-plex-exporter
 ```
 
 Or via Docker Compose:
 
 ```yaml
 prom-plex-exporter:
-  image: ghcr.io/jsclayton/prometheus-plex-exporter
+  image: ghcr.io/drewstreib/prometheus-plex-exporter
   ports:
     - 9000:9000/tcp
   environment:

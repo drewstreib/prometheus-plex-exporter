@@ -122,16 +122,23 @@ func (l *plexListener) onPlaying(c plex.NotificationContainer) error {
 			return fmt.Errorf("error fetching metadata for key %s: %w", n.RatingKey, err)
 		}
 
+		// Same class of bug as the Media[0] indexes in sessions.go, on the websocket
+		// goroutine instead of the scrape path: an empty container panicked the process.
+		if len(metadata.MediaContainer.Metadata) == 0 {
+			return fmt.Errorf("no metadata returned for key %s", n.RatingKey)
+		}
+		media := metadata.MediaContainer.Metadata[0]
+
 		level.Info(l.log).Log("msg", "Received PlaySessionStateNotification",
 			"SessionKey", n.SessionKey,
 			"userName", session.User.Title,
 			"userID", session.User.ID,
 			"state", n.State,
-			"mediaTitle", metadata.MediaContainer.Metadata[0].Title,
-			"mediaID", metadata.MediaContainer.Metadata[0].RatingKey,
+			"mediaTitle", media.Title,
+			"mediaID", media.RatingKey,
 			"timestamp", time.Duration(time.Millisecond)*time.Duration(n.ViewOffset))
 
-		l.activeSessions.Update(n.SessionKey, sessionState(n.State), session, &metadata.MediaContainer.Metadata[0])
+		l.activeSessions.Update(n.SessionKey, sessionState(n.State), session, &media)
 	}
 
 	return nil

@@ -26,3 +26,5 @@ go.work*
 .env
 bin/
 tmp/
+# Vendored deps are not used: the image builds -mod=mod so Dependabot PRs build as-is.
+vendor/
