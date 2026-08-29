@@ -73,7 +73,10 @@ func (s *Server) Listen(ctx context.Context, log log.Logger) error {
 	// ~10s) finds the entry already seeded and Update simply continues it.
 	s.listener.backfillSessions()
 
-	// TODO - Does this automatically reconnect on websocket failure?
+	// Answered 2026-08-29 (was upstream's open TODO): it does NOT reconnect — it dials once and
+	// unwinds on the first read error, so this call returns only when the socket is gone. We let
+	// that propagate: main exits, the Deployment restarts the pod, and backfillSessions re-seeds.
+	// The pod restart IS the reconnect — see FORK.md before adding a retry loop here.
 	conn.SubscribeToNotifications(events, ctrlC, onError)
 	select { // SubscribeToNotifications doesn't return error directly, so we read one from channel without blocking.
 	case err = <-doneChan:
