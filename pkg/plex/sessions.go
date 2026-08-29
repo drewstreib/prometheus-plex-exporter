@@ -128,11 +128,34 @@ func (s *sessions) Describe(ch chan<- *prometheus.Desc) {
 	ch <- metrics.MetricEstimatedTransmittedBytesTotal
 }
 
+// playKey is the exported label tuple for plays_total / play_seconds_total, minus the
+// server labels. It replaces the old per-session `session` label.
+type playKey struct {
+	library, libraryID, libraryType         string
+	mediaType, title, season, episode       string
+	streamType, streamRes, fileRes, bitrate string
+	device, deviceType, user                string
+}
+
+type playAgg struct {
+	plays   float64
+	seconds float64
+}
+
 func (s *sessions) Collect(ch chan<- prometheus.Metric) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	for id, session := range s.sessions {
+	// ⚠ AGGREGATE BEFORE EMITTING. The `session` label used to make every series unique by
+	// construction; it was dropped 2026-08-29 because it bought nothing analytically (and
+	// only ~34% of the cardinality — per-episode titles are the real driver). Without it,
+	// two sessions sharing a tuple — the same user restarting the same episode while the
+	// stopped session is still inside the 1-minute prune window — would emit DUPLICATE
+	// label sets, and client_golang fails the ENTIRE scrape on a duplicate, not just the
+	// offending metric. So sessions must be folded here, never emitted one-per-session.
+	totals := map[playKey]*playAgg{}
+
+	for _, session := range s.sessions {
 		if session.playStarted.IsZero() {
 			continue
 		}
@@ -143,53 +166,55 @@ func (s *sessions) Collect(ch chan<- prometheus.Metric) {
 			continue
 		}
 
-		ch <- metrics.Play(
-			1.0,
-			"plex",
-			s.server.Name,
-			s.server.ID,
-			library.Name,
-			library.ID,
-			library.Type,
-			session.media.Type,
-			title,
-			season,
-			episode,
-			streamDecision(session.session),        // stream type
-			videoResolution(session.session),       // stream res
-			videoResolution(session.media),         // file res
-			strconv.Itoa(bitrate(session.session)), // bitrate
-			session.session.Player.Device,          // device
-			session.session.Player.Product,         // device type
-			session.session.User.Title,
-			id,
-		)
+		k := playKey{
+			library:     library.Name,
+			libraryID:   library.ID,
+			libraryType: library.Type,
+			mediaType:   session.media.Type,
+			title:       title,
+			season:      season,
+			episode:     episode,
+			streamType:  streamDecision(session.session),
+			streamRes:   videoResolution(session.session),
+			fileRes:     videoResolution(session.media),
+			bitrate:     strconv.Itoa(bitrate(session.session)),
+			device:      session.session.Player.Device,
+			deviceType:  session.session.Player.Product,
+			user:        session.session.User.Title,
+		}
 
 		totalPlayTime := session.prevPlayedTime
 		if session.state == statePlaying {
 			totalPlayTime += time.Since(session.playStarted)
 		}
 
+		agg, ok := totals[k]
+		if !ok {
+			agg = &playAgg{}
+			totals[k] = agg
+		}
+		agg.plays++
+		agg.seconds += totalPlayTime.Seconds()
+	}
+
+	for k, agg := range totals {
+		// plays_total is now the NUMBER of concurrent sessions on this tuple; it was
+		// hardcoded 1.0 per session before, which only worked because `session` split them.
+		ch <- metrics.Play(
+			agg.plays,
+			"plex", s.server.Name, s.server.ID,
+			k.library, k.libraryID, k.libraryType,
+			k.mediaType, k.title, k.season, k.episode,
+			k.streamType, k.streamRes, k.fileRes, k.bitrate,
+			k.device, k.deviceType, k.user,
+		)
 		ch <- metrics.PlayDuration(
-			float64(totalPlayTime.Seconds()),
-			"plex",
-			s.server.Name,
-			s.server.ID,
-			library.Name,
-			library.ID,
-			library.Type,
-			session.media.Type,
-			title,
-			season,
-			episode,
-			streamDecision(session.session),        // stream type
-			videoResolution(session.session),       // stream res
-			videoResolution(session.media),         // file res
-			strconv.Itoa(bitrate(session.session)), // bitrate
-			session.session.Player.Device,          // device
-			session.session.Player.Product,         // device type
-			session.session.User.Title,
-			id,
+			agg.seconds,
+			"plex", s.server.Name, s.server.ID,
+			k.library, k.libraryID, k.libraryType,
+			k.mediaType, k.title, k.season, k.episode,
+			k.streamType, k.streamRes, k.fileRes, k.bitrate,
+			k.device, k.deviceType, k.user,
 		)
 	}
 

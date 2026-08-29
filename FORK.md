@@ -61,18 +61,39 @@ git tag v1.1.1 && git push origin v1.1.1     # CI builds both arches, pushes to 
 ```
 Tags are immutable. Then bump `tag@digest` in `manifests/media/plex-exporter.yaml`; Flux deploys it.
 
+## ⚠ BREAKING metric change in v2.0.0 (2026-08-29)
+
+Both defects below were fixed at once; **`plays_total` and `play_seconds_total` changed shape**, and
+old series in Thanos keep the old (wrong) meaning. Drew's call: *"fine to just fix both. i don't care
+about past broken metrics."*
+
+1. **Library labels were ROTATED three ways** — `library` held the id, `library_id` the type,
+   `library_type` the name. `library_duration_total` was always correct, so the two metrics could not
+   be joined on library labels. ⚠ Upstream issue #37 calls this a two-way inversion of
+   `library`/`library_id` — **that is wrong; read `metrics.Play`'s argument order against
+   `playLabels`, not the issue.** Guarded now by `TestCollectLibraryLabelsAreNotRotated`.
+2. **The `session` label is GONE.** It bought nothing analytically and only ~34% of the cardinality
+   (1,413 → 935 distinct series over 90d; the real driver is per-episode `grandchild_title`, which is
+   the point of the metric). ⚠ **Dropping it is NOT just deleting the label** — it was making every
+   series unique by construction. Two sessions sharing a tuple (same user restarting the same episode
+   while the stopped one is inside the 1-minute prune window) now collide, and **client_golang fails
+   the ENTIRE scrape on a duplicate label set**, not just the offending metric. `Collect` therefore
+   folds sessions into a `playKey` map: `plays_total` is now the **count** of concurrent sessions on
+   a tuple (it was hardcoded `1.0`), and `play_seconds_total` is their **sum**. Guarded by
+   `TestCollectAggregatesSessionsSharingATuple`.
+
 ## Known, deliberately not changed
 
-- ⚠ **`play_seconds_total` / `plays_total` carry a three-way ROTATION of the library labels** —
-  `library` holds the id, `library_id` holds the type, `library_type` holds the name. Verified
-  against our own archived data, and `library_duration_total` is correct, so **the two metrics cannot
-  be joined on library labels.** (Upstream issue #37 calls this a two-way inversion; that is wrong.)
-  Fixing it rewrites the meaning of series already in Thanos forever — a deliberate decision, not a
-  drive-by.
-- ⚠ **`session` is a metric label**, so every playback creates two permanently-retained series:
-  **1,044 distinct session values in 90 days** (~2,100 series, ~11.6/day) archived forever.
-  `stream_bitrate` is similarly high-churn (685 distinct values).
 - **Dependency `replace` → `github.com/jsclayton/go-plex-client`**, a 2023 pseudo-version of the
   abandoned `jrudio/go-plex-client`. Dependabot handles a pseudo-version `replace` poorly; this is
   the least-maintained thing in the tree.
-- **There are no tests at all** (upstream shipped none), so `go test ./...` is a no-op that passes.
+- `stream_bitrate` remains high-churn (685 distinct values in 90d) — the next cardinality lever if
+  one is ever wanted, though it is far behind per-episode titles.
+
+## Tests
+
+Upstream shipped none. `pkg/plex/sessions_test.go` covers the two v2.0.0 changes plus the
+panic-on-scrape guards, and registers the collector with a real `prometheus.Registry` and calls
+`Gather()` — so a duplicate label set fails the test exactly as it would fail a scrape.
+⚠ **Each test was controlled by reverting its fix and confirming it fails**; a green suite on its own
+proves the test ran, not that it checks the right thing.

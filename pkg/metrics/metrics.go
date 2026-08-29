@@ -30,7 +30,6 @@ var (
 		"device",                 // Device friendly name
 		"device_type",            //
 		"user",                   // User name
-		"session",
 	)
 
 	ServerInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -68,7 +67,7 @@ var (
 
 	MetricPlaySecondsTotalDesc = prometheus.NewDesc(
 		"play_seconds_total",
-		"Total play time per session",
+		"Total play time, summed over concurrent sessions sharing these labels",
 		playLabels,
 		nil,
 	)
@@ -113,46 +112,54 @@ func LibraryStorage(value int64,
 	)
 }
 
+// ⚠ Argument order below MUST match playLabels, which inherits libraryLabels' order:
+// library_type, library, library_id. Upstream passed (library, libraryID, libraryType)
+// into those three slots, which silently ROTATED all three: `library` carried the id,
+// `library_id` carried the type, `library_type` carried the name. library_duration_total
+// was unaffected (LibraryDuration already passed them in label order), so the two metrics
+// could not be joined on library labels. Verified against 90d of archived samples and
+// fixed 2026-08-29. Upstream issue #37 calls this a two-way inversion — it is three-way.
 func Play(value float64, serverType, serverName, serverID,
 	library, libraryID, libraryType,
 	mediaType,
 	title, childTitle, grandchildTitle,
 	streamType, streamResolution, streamFileResolution, streamBitrate,
 	device, deviceType,
-	user, session string,
+	user string,
 ) prometheus.Metric {
 
 	return prometheus.MustNewConstMetric(MetricPlayCountDesc,
 		prometheus.CounterValue,
 		value,
 		serverType, serverName, serverID,
-		library, libraryID, libraryType,
+		libraryType, library, libraryID,
 		mediaType,
 		title, childTitle, grandchildTitle,
 		streamType, streamResolution, streamFileResolution, streamBitrate,
 		device, deviceType,
-		user, session,
+		user,
 	)
 }
 
+// Same label-order contract as Play above — see that comment before touching this.
 func PlayDuration(value float64, serverType, serverName, serverID,
 	library, libraryID, libraryType,
 	mediaType,
 	title, childTitle, grandchildTitle,
 	streamType, streamResolution, streamFileResolution, streamBitrate,
 	device, deviceType,
-	user, session string,
+	user string,
 ) prometheus.Metric {
 
 	return prometheus.MustNewConstMetric(MetricPlaySecondsTotalDesc,
 		prometheus.CounterValue,
 		value,
 		serverType, serverName, serverID,
-		library, libraryID, libraryType,
+		libraryType, library, libraryID,
 		mediaType,
 		title, childTitle, grandchildTitle,
 		streamType, streamResolution, streamFileResolution, streamBitrate,
 		device, deviceType,
-		user, session,
+		user,
 	)
 }
