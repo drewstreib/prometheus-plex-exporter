@@ -66,6 +66,19 @@ code that has not changed. `go.mod` declares `go 1.27.0`, so an older toolchain 
   at 3m11s, key 1310 then appeared *playing* at that same 3m11s) and per-key seeding would credit the
   whole resume offset as play time on **every resume**. At startup that same offset is the only
   elapsed-time signal there is and the error is one-shot.
+- **Stderr-only logging** (v3.1.0). `silenceClientChatter` in `main.go` points `os.Stdout` at
+  `/dev/null` unless `PLEX_CLIENT_DEBUG` is set. The plex client logs with unconditional
+  `fmt.Print*` to stdout and offers **no toggle**: it dumps every websocket message raw, plus a line
+  per unknown event type and per unmarshal failure. Measured in Loki 2026-08-28: **163,405 of the
+  pod's 166,207 lines (98.3%)** were that chatter against 2,800 of ours, making the exporter the
+  cluster's 4th-heaviest log producer at ~110k lines/day into a **shared 10-day** store.
+  ⚠ **Nothing is lost:** all 20 of the client's stdout writes are debug chatter or an error it also
+  returns / hands to the `SubscribeToNotifications` callback, and we log those on stderr ourselves.
+  ⚠ **`PLEX_CLIENT_DEBUG` is the only way to see the raw notification stream** — set it on the
+  Deployment, don't rebuild. ⚠ The two spam shapes differ per client and swapping the dependency
+  does not fix it: the old jsclayton client emitted `unknown websocket event name` (a small event
+  map) and **zero** raw dumps; jrudio v2.0.0 knows more event types but added
+  `fmt.Printf("%s\n", message)` on **every** message.
 
 ## The plex-client dependency — ⚠ the `replace` is GONE (2026-08-29), don't reinstate it
 
@@ -155,6 +168,31 @@ only by `Update`'s playing→not-playing transition, which such a session never 
    folds sessions into a `playKey` map (it emitted a hardcoded `1.0` per session before). Guarded by
    `TestCollectAggregatesSessionsSharingATuple`.
 
+## The websocket does NOT reconnect — the pod restart IS the reconnect
+
+Settles upstream's unanswered `TODO - Does this automatically reconnect on websocket failure?`
+(2026-08-29). **It does not**, and the exporter deliberately does **not** paper over that.
+
+- `SubscribeToNotifications` dials **once**. On a read error it invokes the error callback and
+  unwinds; there is no retry loop in the client or in `Listen`.
+- **The failure is loud, not silent.** `onError` → `doneChan` → `Listen` returns → `main` exits →
+  Deployment restarts the pod → the startup backfill re-seeds in-flight sessions. So the feared
+  shape — `up{job="plex"}=1` while play metrics are frozen — is **not** how this fails, and no
+  staleness alert is warranted. Guarded by `TestListenReturnsOnAbnormalWebsocketClose`: if `Listen`
+  ever starts *hanging* instead of returning, that assumption is dead and the test says so.
+  ⚠ A server-initiated `close(1000)` is filtered out of `doneChan` by `onError`, so `Listen` returns
+  **nil** and the process exits **0** — same restart, different exit code.
+- **Never observed in the field:** `changes(process_start_time_seconds{job="plex"}[1d])` over Thanos
+  shows zero unexplained process starts 2026-07-31 → 2026-08-28; every start in that window is a
+  known deploy or node event. ⚠ That metric **cannot** distinguish "never died" from "died silently
+  and kept running" — the tests are what close that gap, not the restart count.
+- **Residual, accepted:** the client sets no read deadline and no ping/pong, so a black-holed TCP
+  connection blocks `ReadMessage` indefinitely. The client's 1s keepalive write bounds it to Linux's
+  retransmit timeout (~15 min), after which — **code-read, never reproduced** — the ticker branch
+  calls the callback with no `return`, so the next tick sends on an already-closed `doneChan` and
+  **panics**. Still a crash, still a restart, just an ugly one. Fixing it properly means owning the
+  subscribe loop (gorilla is already a direct dependency); declined 2026-08-29 as not worth the code.
+
 ## Known, deliberately not changed
 
 - `stream_bitrate` remains high-churn (685 distinct values in 90d) — the next cardinality lever if
@@ -164,7 +202,9 @@ only by `Update`'s playing→not-playing transition, which such a session never 
 
 Upstream shipped none. `pkg/plex/sessions_test.go` covers the two v2.0.0 changes, the
 panic-on-scrape guards, and v3.0.0's startup backfill, cumulative counters and stale-session
-retirement. It registers the collector with a real `prometheus.Registry` and calls `Gather()` — so a
+retirement. `pkg/plex/listener_test.go` drives a fake Plex that slams the
+websocket and pins that `Listen` returns rather than hangs; `cmd/.../main_test.go` re-execs itself
+to prove the client's `fmt.Println` reaches nowhere while our stderr survives. It registers the collector with a real `prometheus.Registry` and calls `Gather()` — so a
 duplicate label set fails the test exactly as it would fail a scrape.
 ⚠ **Each test was controlled by reverting its fix and confirming it fails**; a green suite on its own
 proves the test ran, not that it checks the right thing.
