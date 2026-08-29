@@ -67,6 +67,35 @@ code that has not changed. `go.mod` declares `go 1.27.0`, so an older toolchain 
   whole resume offset as play time on **every resume**. At startup that same offset is the only
   elapsed-time signal there is and the error is one-shot.
 
+## The plex-client dependency — ⚠ the `replace` is GONE (2026-08-29), don't reinstate it
+
+We track **`github.com/jrudio/go-plex-client/v2 v2.0.0`** directly. Until 2026-08-29 `go.mod` carried a
+`replace` → `jsclayton/go-plex-client`, a 2023 pseudo-version, for
+[jrudio#56](https://github.com/jrudio/go-plex-client/pull/56) (`cannot unmarshal array into ... rating
+of type float64`).
+
+⚠ **The premise of that `replace` was wrong, and this file asserted the wrong thing for a day:** it
+called `jrudio/go-plex-client` *abandoned*. It is not — commits through 2026-06-10 and a **`v2.0.0` tag
+cut 2026-06-09**, its first ever. PR #56 was closed unmerged, but v2.0.0 fixes that exact bug properly
+with a `FlexibleFloat64` type and a custom `UnmarshalJSON`. ⚠ **Don't re-derive "abandoned" from a
+quiet-looking repo — check commits and tags** (`gh api repos/OWNER/REPO/commits`, `/tags`).
+
+Measured before the move, all on the real artifact:
+- Import path only (3 files); **all tests pass unchanged**, `govulncheck -mode=binary` stays **0**.
+- Module graph **133 → 110**: `go mod tidy` prunes `badger/v3`, `ristretto`, `urfave/cli`,
+  `go-homedir` — reachable only via the client's CLI/store code we never call. Net new require:
+  `golang-jwt/jwt/v5`. Binary +1.2%.
+- ⚠ **Tests could NOT have caught the real risk** — they build `plex.Metadata` from struct literals, so
+  a changed JSON tag passes tests and silently yields zero values against live Plex. All **17** fields
+  we read off real Plex JSON (`LibrarySectionID`, `Type`, `Title`, `GrandparentTitle`, `ParentTitle`,
+  `Index`, `ParentIndex`, `ViewOffset`, `SessionKey`, `RatingKey`, `Bitrate`, `VideoResolution`,
+  `Decision`, `Player.Device`, `Player.Product`, `Player.State`, `Duration`) were diffed
+  byte-identical old-vs-v2. v2's `FlexibleFloat64`/`Ratings` reshaping touches only fields we never read.
+
+⚠ **A pin freezes the library's own code, NOT its dependencies** — Go MVS means our `go.mod` wins
+(the old pin asked for `gorilla/websocket v1.4.0` while we shipped v1.5.3). What the pin really cost
+was owning ~2,750 frozen lines with no upstream to take a fix from.
+
 ## Release
 
 ```
@@ -128,9 +157,6 @@ only by `Update`'s playing→not-playing transition, which such a session never 
 
 ## Known, deliberately not changed
 
-- **Dependency `replace` → `github.com/jsclayton/go-plex-client`**, a 2023 pseudo-version of the
-  abandoned `jrudio/go-plex-client`. Dependabot handles a pseudo-version `replace` poorly; this is
-  the least-maintained thing in the tree.
 - `stream_bitrate` remains high-churn (685 distinct values in 90d) — the next cardinality lever if
   one is ever wanted, though it is far behind per-episode titles.
 

@@ -10,7 +10,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/gorilla/websocket"
-	"github.com/jrudio/go-plex-client"
+	"github.com/jrudio/go-plex-client/v2"
 )
 
 var (

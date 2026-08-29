@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	plex "github.com/jrudio/go-plex-client"
+	plex "github.com/jrudio/go-plex-client/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
