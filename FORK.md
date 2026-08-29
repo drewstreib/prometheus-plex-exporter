@@ -195,6 +195,7 @@ Settles upstream's unanswered `TODO - Does this automatically reconnect on webso
 
 ## Known, deliberately not changed
 
+- **`Listen`'s "Successfully connected" log no longer prints at startup, and that is not a fault.** The jsclayton client ran its ticker loop in a `go func()` — **non-blocking**, so the line (which sits *after* the `SubscribeToNotifications` call) printed on connect. **jrudio v2.0.0 runs the same loop inline — blocking** — so the call returns only when the socket is already gone, and the line is reachable only in a shutdown race. Not moved above the call because it would add nothing: **a failed dial exits the process**, so a Running pod already proves the websocket connected. ⚠ **Don't read its absence as a problem, and don't cite a pre-2026-08-29 occurrence as evidence of anything but a normal start** — `done/2026-08-29-plex-exporter-arm64-fork.md` uses it that way, correctly for the build it was testing.
 - `stream_bitrate` remains high-churn (685 distinct values in 90d) — the next cardinality lever if
   one is ever wanted, though it is far behind per-episode titles.
 
