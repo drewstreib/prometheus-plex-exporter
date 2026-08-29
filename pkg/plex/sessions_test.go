@@ -258,3 +258,113 @@ func TestSeedDoesNotOverwriteAKnownSession(t *testing.T) {
 		t.Errorf("play_seconds_total = %v, want ~0 — Seed clobbered a live session's timing", got)
 	}
 }
+
+// --- cumulative counters and stale-session retirement ---------------------------------
+//
+// plays_total / play_seconds_total are declared CounterValue and named _total, so they must
+// be cumulative and monotonic. They used to be rebuilt from the LIVE session map on every
+// scrape, so a series vanished when its session was pruned — which Prometheus reads as a
+// counter reset, and increase() then re-adds the whole value.
+
+// ageSession backdates a session's last-notification time, standing in for wall-clock passing.
+func ageSession(s *sessions, key string, lastSeenAgo time.Duration) {
+	ss := s.sessions[key]
+	ss.lastUpdate = time.Now().Add(-lastSeenAgo)
+	s.sessions[key] = ss
+}
+
+// Pruning a stopped session must bank its totals, not discard them.
+func TestPruneBanksTotalsSoTheCounterDoesNotDrop(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Seed("1310", statePlaying, &live, &media, seedOffset)
+	s.Update("1310", stateStopped, &live, &media)
+
+	before := seconds(t, gatherFrom(t, s))
+	if before < 600 {
+		t.Fatalf("fixture banked only %v seconds; the test could not detect a drop", before)
+	}
+
+	ageSession(s, "1310", 2*sessionTimeout)
+	s.pruneOldSessions()
+
+	if n := len(s.sessions); n != 0 {
+		t.Fatalf("stopped session not pruned: %d left", n)
+	}
+	if after := seconds(t, gatherFrom(t, s)); after < before {
+		t.Errorf("play_seconds_total dropped %v -> %v when the session was pruned", before, after)
+	}
+}
+
+// A client that vanishes (network drop, app killed) never sends `stopped`. Pruning only
+// stopped sessions left those immortal, and a still-`playing` one accrued play time forever.
+func TestPruneRetiresAStaleSessionThatNeverStopped(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Seed("1310", statePlaying, &live, &media, 16*time.Minute)
+	ageSession(s, "1310", 6*time.Minute) // Plex went quiet, state still `playing`
+
+	before := seconds(t, gatherFrom(t, s))
+	s.pruneOldSessions()
+
+	if n := len(s.sessions); n != 0 {
+		t.Fatalf("a session that never stopped was kept: %d left", n)
+	}
+	if after := seconds(t, gatherFrom(t, s)); after < before {
+		t.Errorf("play_seconds_total dropped %v -> %v when the stale session was retired", before, after)
+	}
+}
+
+// Credit stops at the last notification. Plex sends one every ~10s, so time after that is
+// unobserved — counting it would invent play time for a stream that may have ended.
+func TestPlayTimeStopsAtTheLastNotification(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Seed("1310", statePlaying, &live, &media, 16*time.Minute)
+	ageSession(s, "1310", 6*time.Minute)
+
+	if got := seconds(t, gatherFrom(t, s)); got < 600 || got > 605 {
+		t.Errorf("play_seconds_total = %v, want ~600 (10m observed), not ~960 (16m of wall clock)", got)
+	}
+}
+
+// Successive plays of the same episode must add up rather than replace one another.
+func TestPlaysAccumulateAcrossRetiredSessions(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+
+	for _, key := range []string{"1310", "1330"} { // Plex issues a new SessionKey per play
+		s.Seed(key, statePlaying, &live, &media, seedOffset)
+		s.Update(key, stateStopped, &live, &media)
+		ageSession(s, key, 2*sessionTimeout)
+		s.pruneOldSessions()
+	}
+
+	mf := family(t, gatherFrom(t, s), "plays_total")
+	if len(mf.GetMetric()) != 1 {
+		t.Fatalf("plays_total: got %d series, want 1", len(mf.GetMetric()))
+	}
+	if got := mf.GetMetric()[0].GetCounter().GetValue(); got != 2 {
+		t.Errorf("plays_total = %v, want 2 — a retired play must stay counted", got)
+	}
+}
+
+// estimated_transmit_bytes_total is flattened by Update on a playing->not-playing transition.
+// A session retired while still playing never makes that transition, so retire must flatten it.
+func TestEstimatedBytesSurviveRetiringAPlayingSession(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Seed("1310", statePlaying, &live, &media, 16*time.Minute)
+	ageSession(s, "1310", 6*time.Minute)
+
+	before := s.extrapolatedTransmittedBytes()
+	if before == 0 {
+		t.Fatal("fixture produced 0 bytes; the test could not detect a drop")
+	}
+
+	s.pruneOldSessions()
+
+	if after := s.extrapolatedTransmittedBytes(); after != before {
+		t.Errorf("estimated_transmit_bytes_total = %v after retiring a playing session, want %v", after, before)
+	}
+}

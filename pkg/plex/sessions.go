@@ -22,10 +22,15 @@ const (
 
 	mediaTypeEpisode = "episode"
 
-	// How long metrics for sessions are kept after the last update.
-	// This is used to prune prometheus metrics and keep cardinality
-	// down.
+	// How long a session that Plex told us had STOPPED is kept before it is retired.
 	sessionTimeout = time.Minute
+
+	// How long a session that never stopped is kept after its last notification. Plex sends
+	// one every ~10s per session (measured 2026-08-29), so this is ~30 missed notifications:
+	// it fires only when a client vanished without a stop — network drop, app killed — and
+	// never on a brief websocket reconnect. Without it such a session is immortal, and a
+	// still-`playing` one keeps accruing play time for a stream that ended hours ago.
+	sessionStaleTimeout = 5 * time.Minute
 )
 
 type session struct {
@@ -38,16 +43,27 @@ type session struct {
 }
 
 type sessions struct {
-	mtx                            sync.Mutex
-	sessions                       map[string]session
-	server                         *Server
+	mtx      sync.Mutex
+	sessions map[string]session
+	server   *Server
+
+	// completed banks the totals of sessions that have left `sessions`, so plays_total and
+	// play_seconds_total keep the cumulative meaning their _total suffix and CounterValue
+	// type promise. Without it a series simply VANISHES when its session is pruned, which
+	// Prometheus reads as a counter reset — increase() then re-adds the whole value.
+	// ⚠ It is never pruned: that is what makes the counter monotonic. It therefore grows
+	// with the number of distinct label tuples the process has seen (~900 over 90d
+	// historically), which is the memory and scrape-size cost of the guarantee.
+	completed map[playKey]*playAgg
+
 	totalEstimatedTransmittedKBits float64
 }
 
 func NewSessions(ctx context.Context, server *Server) *sessions {
 	s := &sessions{
-		sessions: map[string]session{},
-		server:   server,
+		sessions:  map[string]session{},
+		completed: map[playKey]*playAgg{},
+		server:    server,
 	}
 
 	ticker := time.NewTicker(time.Minute)
@@ -71,7 +87,12 @@ func (s *sessions) pruneOldSessions() {
 	defer s.mtx.Unlock()
 
 	for k, v := range s.sessions {
-		if v.state == stateStopped && time.Since(v.lastUpdate) > sessionTimeout {
+		timeout := sessionStaleTimeout
+		if v.state == stateStopped {
+			timeout = sessionTimeout
+		}
+		if time.Since(v.lastUpdate) > timeout {
+			s.retire(v)
 			delete(s.sessions, k)
 		}
 	}
@@ -141,13 +162,54 @@ func (s *sessions) Seed(sessionID string, state sessionState, live, media *plex.
 	s.sessions[sessionID] = ss
 }
 
+// observedPlayTime is the play time we have actually SEEN for a session. While playing, the
+// current interval is credited only up to lastUpdate, not to now: Plex sends a notification
+// every ~10s, so anything past the last one is unobserved. That is what lets retire() bank
+// exactly the value Collect was already emitting, so the counter cannot step backwards when
+// a session is pruned.
+func (ss session) observedPlayTime() time.Duration {
+	if ss.state != statePlaying {
+		return ss.prevPlayedTime
+	}
+	return ss.prevPlayedTime + ss.lastUpdate.Sub(ss.playStarted)
+}
+
+// retire banks a departing session's totals into `completed`. Caller holds the mutex and must
+// delete the session afterwards; banking twice would double-count it.
+func (s *sessions) retire(ss session) {
+	k, ok := s.playKeyFor(ss)
+	if !ok {
+		return
+	}
+
+	if s.completed == nil {
+		s.completed = map[playKey]*playAgg{}
+	}
+	agg, ok := s.completed[k]
+	if !ok {
+		agg = &playAgg{}
+		s.completed[k] = agg
+	}
+	agg.plays++
+	agg.seconds += ss.observedPlayTime().Seconds()
+
+	// A session retired while still playing never reached Update's flatten branch, so its
+	// estimated bytes would otherwise vanish with it and drop that counter too.
+	if ss.state == statePlaying {
+		played := ss.lastUpdate.Sub(ss.playStarted)
+		s.totalEstimatedTransmittedKBits += played.Seconds() * float64(bitrate(ss.session))
+	}
+}
+
 func (s *sessions) extrapolatedTransmittedBytes() float64 {
 
 	total := s.totalEstimatedTransmittedKBits
 
 	for _, ss := range s.sessions {
 		if ss.state == statePlaying {
-			total += time.Since(ss.playStarted).Seconds() * float64(bitrate(ss.session))
+			// lastUpdate, not now — same reason as observedPlayTime: retire() banks this
+			// exact quantity, so using now here would make the counter drop on a prune.
+			total += ss.lastUpdate.Sub(ss.playStarted).Seconds() * float64(bitrate(ss.session))
 		}
 	}
 
@@ -175,6 +237,37 @@ type playAgg struct {
 	seconds float64
 }
 
+// playKeyFor builds the exported label tuple for a session. Not ok when the session has never
+// been observed playing, or when its library has not been resolved yet — in both cases there
+// is nothing meaningful to key it by, and Collect and retire must agree on that.
+func (s *sessions) playKeyFor(ss session) (playKey, bool) {
+	if ss.playStarted.IsZero() {
+		return playKey{}, false
+	}
+	library := s.server.Library(ss.media.LibrarySectionID.String())
+	if library == nil {
+		return playKey{}, false
+	}
+	title, season, episode := labels(ss.media)
+
+	return playKey{
+		library:     library.Name,
+		libraryID:   library.ID,
+		libraryType: library.Type,
+		mediaType:   ss.media.Type,
+		title:       title,
+		season:      season,
+		episode:     episode,
+		streamType:  streamDecision(ss.session),
+		streamRes:   videoResolution(ss.session),
+		fileRes:     videoResolution(ss.media),
+		bitrate:     strconv.Itoa(bitrate(ss.session)),
+		device:      ss.session.Player.Device,
+		deviceType:  ss.session.Player.Product,
+		user:        ss.session.User.Title,
+	}, true
+}
+
 func (s *sessions) Collect(ch chan<- prometheus.Metric) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -186,53 +279,28 @@ func (s *sessions) Collect(ch chan<- prometheus.Metric) {
 	// stopped session is still inside the 1-minute prune window — would emit DUPLICATE
 	// label sets, and client_golang fails the ENTIRE scrape on a duplicate, not just the
 	// offending metric. So sessions must be folded here, never emitted one-per-session.
-	totals := map[playKey]*playAgg{}
+	//
+	// Emitted value = what retired sessions banked + what the live ones have run up so far.
+	totals := make(map[playKey]playAgg, len(s.completed)+len(s.sessions))
+	for k, agg := range s.completed {
+		totals[k] = *agg
+	}
 
 	for _, session := range s.sessions {
-		if session.playStarted.IsZero() {
-			continue
-		}
-
-		title, season, episode := labels(session.media)
-		library := s.server.Library(session.media.LibrarySectionID.String())
-		if library == nil {
-			continue
-		}
-
-		k := playKey{
-			library:     library.Name,
-			libraryID:   library.ID,
-			libraryType: library.Type,
-			mediaType:   session.media.Type,
-			title:       title,
-			season:      season,
-			episode:     episode,
-			streamType:  streamDecision(session.session),
-			streamRes:   videoResolution(session.session),
-			fileRes:     videoResolution(session.media),
-			bitrate:     strconv.Itoa(bitrate(session.session)),
-			device:      session.session.Player.Device,
-			deviceType:  session.session.Player.Product,
-			user:        session.session.User.Title,
-		}
-
-		totalPlayTime := session.prevPlayedTime
-		if session.state == statePlaying {
-			totalPlayTime += time.Since(session.playStarted)
-		}
-
-		agg, ok := totals[k]
+		k, ok := s.playKeyFor(session)
 		if !ok {
-			agg = &playAgg{}
-			totals[k] = agg
+			continue
 		}
+		agg := totals[k]
 		agg.plays++
-		agg.seconds += totalPlayTime.Seconds()
+		agg.seconds += session.observedPlayTime().Seconds()
+		totals[k] = agg
 	}
 
 	for k, agg := range totals {
-		// plays_total is now the NUMBER of concurrent sessions on this tuple; it was
-		// hardcoded 1.0 per session before, which only worked because `session` split them.
+		// plays_total counts PLAYS, cumulatively: every session this process has seen on
+		// this tuple, retired ones included. It was hardcoded 1.0 per session before v2.0.0,
+		// which only worked because the `session` label split them.
 		ch <- metrics.Play(
 			agg.plays,
 			"plex", s.server.Name, s.server.ID,

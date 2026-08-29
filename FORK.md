@@ -53,7 +53,7 @@ code that has not changed. `go.mod` declares `go 1.27.0`, so an older toolchain 
   `Collect` on its own goroutine — so one such session killed the exporter on the next scrape.
 - **Bounded HTTP client:** a 10s timeout (upstream has none, so a hung Plex blocks the 5s refresh
   goroutine forever) and a 16 MiB response cap (upstream `io.ReadAll`s the body unbounded).
-- **Startup backfill of in-flight sessions** (v2.1.0). `Update` stamps `playStarted` only on a
+- **Startup backfill of in-flight sessions** (v3.0.0). `Update` stamps `playStarted` only on a
   transition *into* playing, so a session already in flight when the process starts never gets one —
   and a pod roll happens on every image bump. Playing-at-start was undercounted (time restarted from
   zero); **paused-at-start was dropped entirely**, because `playStarted` stayed zero and `Collect`
@@ -74,11 +74,43 @@ git tag v1.1.1 && git push origin v1.1.1     # CI builds both arches, pushes to 
 ```
 Tags are immutable. Then bump `tag@digest` in `manifests/media/plex-exporter.yaml`; Flux deploys it.
 
-## ⚠ BREAKING metric change in v2.0.0 (2026-08-29)
+## ⚠ BREAKING metric changes
 
-Both defects below were fixed at once; **`plays_total` and `play_seconds_total` changed shape**, and
-old series in Thanos keep the old (wrong) meaning. Drew's call: *"fine to just fix both. i don't care
-about past broken metrics."*
+**`plays_total` and `play_seconds_total` changed shape twice on 2026-08-29**, and old series in
+Thanos keep their old meanings. Drew's call on the first round, which governs both: *"fine to just
+fix both. i don't care about past broken metrics."*
+
+### v3.0.0 — the counters are cumulative
+
+⚠ **They were rebuilt from the LIVE session map on every scrape**, so a series *vanished* when its
+session was pruned a minute after stopping. That contradicts both the `_total` suffix and the
+`CounterValue` type: Prometheus reads a disappear/reappear as a counter reset and `increase()`
+re-adds the whole value. `plays_total` in particular was really a gauge — the count of *concurrent*
+sessions on a tuple.
+
+`sessions.completed` now banks a session's totals in `retire()` before it leaves the map, and
+`Collect` emits banked + live. So `plays_total` is the cumulative **number of plays** this process
+has seen on a tuple, and `play_seconds_total` their summed watch time.
+- ⚠ **`completed` is never pruned — that is what makes the counter monotonic.** It grows with the
+  number of distinct tuples the process has seen (~900 over 90d historically; ~1–2 MB, against an
+  11Mi RSS and a 128Mi limit), and the scrape payload grows with it. That is the cost of the
+  guarantee, not a leak.
+- **Credit stops at `lastUpdate`, never `time.Now()`** (`session.observedPlayTime`). Plex sends a
+  notification every ~10s, so time past the last one is unobserved. This is what lets `retire()` bank
+  exactly the value `Collect` was already emitting — crediting to now instead would make the counter
+  step *backwards* on a prune, which is the very thing this fixes.
+
+### v3.0.0 — sessions that never stop are retired
+
+⚠ **`pruneOldSessions` only ever evicted `stopped` sessions.** A client that vanishes — network drop,
+app killed — sends no stop, so its session was immortal, and a still-`playing` one kept accruing play
+time for a stream that ended hours ago. Anything idle past `sessionStaleTimeout` (5 min, ~30 missed
+notifications, so a brief websocket reconnect cannot trip it) is now retired too. Explicitly-stopped
+sessions keep the 1-minute `sessionTimeout`.
+⚠ `retire()` must also flatten a still-playing session's estimated bytes: those are otherwise banked
+only by `Update`'s playing→not-playing transition, which such a session never makes.
+
+### v2.0.0 — rotated library labels, and the `session` label dropped
 
 1. **Library labels were ROTATED three ways** — `library` held the id, `library_id` the type,
    `library_type` the name. `library_duration_total` was always correct, so the two metrics could not
@@ -91,8 +123,7 @@ about past broken metrics."*
    series unique by construction. Two sessions sharing a tuple (same user restarting the same episode
    while the stopped one is inside the 1-minute prune window) now collide, and **client_golang fails
    the ENTIRE scrape on a duplicate label set**, not just the offending metric. `Collect` therefore
-   folds sessions into a `playKey` map: `plays_total` is now the **count** of concurrent sessions on
-   a tuple (it was hardcoded `1.0`), and `play_seconds_total` is their **sum**. Guarded by
+   folds sessions into a `playKey` map (it emitted a hardcoded `1.0` per session before). Guarded by
    `TestCollectAggregatesSessionsSharingATuple`.
 
 ## Known, deliberately not changed
@@ -106,8 +137,8 @@ about past broken metrics."*
 ## Tests
 
 Upstream shipped none. `pkg/plex/sessions_test.go` covers the two v2.0.0 changes, the
-panic-on-scrape guards and the v2.1.0 startup backfill, and registers the collector with a real
-`prometheus.Registry` and calls `Gather()` — so a duplicate label set fails the test exactly as it
-would fail a scrape.
+panic-on-scrape guards, and v3.0.0's startup backfill, cumulative counters and stale-session
+retirement. It registers the collector with a real `prometheus.Registry` and calls `Gather()` — so a
+duplicate label set fails the test exactly as it would fail a scrape.
 ⚠ **Each test was controlled by reverting its fix and confirming it fails**; a green suite on its own
 proves the test ran, not that it checks the right thing.
