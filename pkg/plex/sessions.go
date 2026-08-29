@@ -108,6 +108,39 @@ func (s *sessions) Update(sessionID string, newState sessionState, newSession *p
 	s.sessions[sessionID] = ss
 }
 
+// Seed credits a session that was already in flight when the process started, backfilling
+// the play time it accrued before we existed from the session's ViewOffset.
+//
+// ⚠ STARTUP ONLY — never seed on first sight of an unknown session key. Plex assigns a NEW
+// SessionKey to a resume, so unknown keys routinely arrive mid-file: measured 2026-08-29,
+// key 1308 sat paused at 3m11s and key 1310 then appeared *playing* at that same 3m11s.
+// Seeding per unknown key would credit the whole resume offset as play time on every resume;
+// at startup the same offset is the only elapsed-time signal there is and the error is one-shot.
+func (s *sessions) Seed(sessionID string, state sessionState, live, media *plex.Metadata, viewOffset time.Duration) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	if _, known := s.sessions[sessionID]; known {
+		// A notification beat the backfill to it; that path has the real transition and wins.
+		return
+	}
+
+	now := time.Now()
+	ss := session{
+		session:     *live,
+		media:       *media,
+		state:       state,
+		lastUpdate:  now,
+		playStarted: now.Add(-viewOffset),
+	}
+	if state != statePlaying {
+		// Nothing accrues from playStarted unless the session is playing, so bank the offset
+		// directly. playStarted is still set, because Collect skips a zero one outright.
+		ss.prevPlayedTime = viewOffset
+	}
+	s.sessions[sessionID] = ss
+}
+
 func (s *sessions) extrapolatedTransmittedBytes() float64 {
 
 	total := s.totalEstimatedTransmittedKBits

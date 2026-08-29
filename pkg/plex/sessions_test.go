@@ -26,8 +26,10 @@ func testServer() *Server {
 	}
 }
 
-func playingSession(episode string) session {
-	media := plex.Metadata{
+// sessionMetadata returns the (live session, library media) pair the listener hands to
+// Update and Seed.
+func sessionMetadata(episode string) (live, media plex.Metadata) {
+	media = plex.Metadata{
 		LibrarySectionID: json.Number(libID),
 		Type:             "episode",
 		GrandparentTitle: "Some Series",
@@ -35,7 +37,7 @@ func playingSession(episode string) session {
 		Title:            episode,
 		Media:            []plex.Media{{VideoResolution: "1080"}},
 	}
-	live := media
+	live = media
 	live.Media = []plex.Media{{
 		Bitrate:         3652,
 		VideoResolution: "1080",
@@ -43,6 +45,11 @@ func playingSession(episode string) session {
 	}}
 	live.Player = plex.Player{Device: "tvOS", Product: "Plex for Apple TV"}
 	live.User = plex.User{Title: "someone"}
+	return live, media
+}
+
+func playingSession(episode string) session {
+	live, media := sessionMetadata(episode)
 
 	return session{
 		session:     live,
@@ -57,7 +64,11 @@ func playingSession(episode string) session {
 // here exactly as it would fail a Prometheus scrape.
 func gather(t *testing.T, ss map[string]session) []*dto.MetricFamily {
 	t.Helper()
-	s := &sessions{sessions: ss, server: testServer()}
+	return gatherFrom(t, &sessions{sessions: ss, server: testServer()})
+}
+
+func gatherFrom(t *testing.T, s *sessions) []*dto.MetricFamily {
+	t.Helper()
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(s)
 	mfs, err := reg.Gather()
@@ -162,5 +173,88 @@ func TestCollectSurvivesSessionsWithNoMedia(t *testing.T) {
 	mfs := gather(t, map[string]session{"s1": bare, "s2": noPart})
 	if n := len(family(t, mfs, "plays_total").GetMetric()); n != 2 {
 		t.Errorf("got %d series, want 2", n)
+	}
+}
+
+// --- startup backfill (Seed) ---------------------------------------------------------
+//
+// Update stamps playStarted only on a transition INTO playing, so a session already in
+// flight when the process starts never gets one. Seed is the startup backfill for that.
+
+const seedOffset = 10 * time.Minute
+
+func emptySessions() *sessions {
+	return &sessions{sessions: map[string]session{}, server: testServer()}
+}
+
+// seconds asserts exactly one play_seconds_total series and returns its value.
+func seconds(t *testing.T, mfs []*dto.MetricFamily) float64 {
+	t.Helper()
+	mf := family(t, mfs, "play_seconds_total")
+	if len(mf.GetMetric()) != 1 {
+		t.Fatalf("play_seconds_total: got %d series, want 1", len(mf.GetMetric()))
+	}
+	return mf.GetMetric()[0].GetCounter().GetValue()
+}
+
+// A session PLAYING at startup keeps the time it accrued before the process existed.
+func TestSeedPlayingBackfillsElapsedTime(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Seed("1310", statePlaying, &live, &media, seedOffset)
+
+	if got := seconds(t, gatherFrom(t, s)); got < 600 || got > 605 {
+		t.Errorf("play_seconds_total = %v, want ~600 (the backfilled ViewOffset)", got)
+	}
+}
+
+// A session PAUSED at startup used to be dropped entirely, not merely undercounted:
+// playStarted stayed zero and Collect skips a zero playStarted outright.
+func TestSeedPausedIsCountedNotSkipped(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Seed("1308", statePaused, &live, &media, seedOffset)
+
+	if got := seconds(t, gatherFrom(t, s)); got < 600 || got > 605 {
+		t.Errorf("play_seconds_total = %v, want ~600 — a paused session must still be collected", got)
+	}
+}
+
+// Pausing flattens time.Since(playStarted) into prevPlayedTime. Since Seed backdates
+// playStarted rather than pre-filling prevPlayedTime, that must not count the offset twice.
+func TestSeedPlayingDoesNotDoubleCountOnPause(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Seed("1310", statePlaying, &live, &media, seedOffset)
+	s.Update("1310", statePaused, &live, &media)
+
+	if got := seconds(t, gatherFrom(t, s)); got < 600 || got > 605 {
+		t.Errorf("play_seconds_total = %v, want ~600 not ~1200 (offset counted twice)", got)
+	}
+}
+
+// The mirror case: a paused seed banks the offset in prevPlayedTime, so resuming must add
+// to it rather than restart from it.
+func TestSeedPausedResumesOnTopOfTheBankedOffset(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Seed("1308", statePaused, &live, &media, seedOffset)
+	s.Update("1308", statePlaying, &live, &media)
+
+	if got := seconds(t, gatherFrom(t, s)); got < 600 || got > 605 {
+		t.Errorf("play_seconds_total = %v, want ~600 plus the moment since resume", got)
+	}
+}
+
+// Plex sends a notification every ~10s, so one can land before the backfill finishes. The
+// notification has the real transition; the backfill must not overwrite it.
+func TestSeedDoesNotOverwriteAKnownSession(t *testing.T) {
+	s := emptySessions()
+	live, media := sessionMetadata("Ep 1")
+	s.Update("1310", statePlaying, &live, &media)
+	s.Seed("1310", statePlaying, &live, &media, seedOffset)
+
+	if got := seconds(t, gatherFrom(t, s)); got > 5 {
+		t.Errorf("play_seconds_total = %v, want ~0 — Seed clobbered a live session's timing", got)
 	}
 }

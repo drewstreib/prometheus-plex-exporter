@@ -53,6 +53,19 @@ code that has not changed. `go.mod` declares `go 1.27.0`, so an older toolchain 
   `Collect` on its own goroutine — so one such session killed the exporter on the next scrape.
 - **Bounded HTTP client:** a 10s timeout (upstream has none, so a hung Plex blocks the 5s refresh
   goroutine forever) and a 16 MiB response cap (upstream `io.ReadAll`s the body unbounded).
+- **Startup backfill of in-flight sessions** (v2.1.0). `Update` stamps `playStarted` only on a
+  transition *into* playing, so a session already in flight when the process starts never gets one —
+  and a pod roll happens on every image bump. Playing-at-start was undercounted (time restarted from
+  zero); **paused-at-start was dropped entirely**, because `playStarted` stayed zero and `Collect`
+  skips a zero `playStarted` outright. `plexListener.backfillSessions` now reads `GetSessions()` once
+  before subscribing and calls `sessions.Seed`, backdating `playStarted` by the session's
+  `ViewOffset` (banking it in `prevPlayedTime` instead when not playing, so pausing cannot count it
+  twice). ⚠ **Seeding is STARTUP-ONLY and must stay that way** — the obvious generalisation, seeding
+  on first sight of any unknown session key, is wrong: **Plex assigns a NEW `SessionKey` to a
+  resume**, so unknown keys routinely arrive mid-file (measured 2026-08-29 in Loki: key 1308 paused
+  at 3m11s, key 1310 then appeared *playing* at that same 3m11s) and per-key seeding would credit the
+  whole resume offset as play time on **every resume**. At startup that same offset is the only
+  elapsed-time signal there is and the error is one-shot.
 
 ## Release
 
@@ -92,8 +105,9 @@ about past broken metrics."*
 
 ## Tests
 
-Upstream shipped none. `pkg/plex/sessions_test.go` covers the two v2.0.0 changes plus the
-panic-on-scrape guards, and registers the collector with a real `prometheus.Registry` and calls
-`Gather()` — so a duplicate label set fails the test exactly as it would fail a scrape.
+Upstream shipped none. `pkg/plex/sessions_test.go` covers the two v2.0.0 changes, the
+panic-on-scrape guards and the v2.1.0 startup backfill, and registers the collector with a real
+`prometheus.Registry` and calls `Gather()` — so a duplicate label set fails the test exactly as it
+would fail a scrape.
 ⚠ **Each test was controlled by reverting its fix and confirming it fails**; a green suite on its own
 proves the test ran, not that it checks the right thing.
