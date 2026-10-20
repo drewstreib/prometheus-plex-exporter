@@ -1,8 +1,9 @@
 # Dep hygiene for the fork. Upstream is dormant (zero commits since 2024-08-21), so nothing else
 # will ever patch this Go tree.
-# ⚠ INERT: GitHub flags this repo a fork, and version updates are OFF by default on forks whatever
-# this file says -- no Dependabot run has ever happened here (checked 2026-10-20: no
-# `dynamic/dependabot/dependabot-updates` workflow). Enabling it is the repo Settings toggle.
+# ⚠ GitHub flags this repo a fork, and version updates are OFF by default on forks whatever this
+# file says -- nothing ran here 2026-08-29..2026-10-20. Enabled by hand (Settings -> Advanced
+# Security, Drew, 2026-10-20). Proof it is on = a `dynamic/dependabot/dependabot-updates` workflow
+# in the Actions list; if that is missing, this file is inert again.
 # ⚠ Even when on, it never moves go.mod's `go` directive (dependabot-core#9527), i.e. not the toolchain.
 # ⚠ gomod bumps work only because the image builds -mod=mod; see the root Dockerfile.
 version: 2
