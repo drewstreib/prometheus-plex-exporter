@@ -1,7 +1,10 @@
 # Dep hygiene for the fork. Upstream is dormant (zero commits since 2024-08-21), so nothing else
-# will ever patch this Go tree -- these PRs are the whole reason no PATROL.md roster item exists
-# for the fork. The resulting image tag bump reaches the cluster through x1's daily renovate-merge
-# sweep. ⚠ gomod bumps work only because the image builds -mod=mod; see the root Dockerfile.
+# will ever patch this Go tree.
+# ⚠ INERT: GitHub flags this repo a fork, and version updates are OFF by default on forks whatever
+# this file says -- no Dependabot run has ever happened here (checked 2026-10-20: no
+# `dynamic/dependabot/dependabot-updates` workflow). Enabling it is the repo Settings toggle.
+# ⚠ Even when on, it never moves go.mod's `go` directive (dependabot-core#9527), i.e. not the toolchain.
+# ⚠ gomod bumps work only because the image builds -mod=mod; see the root Dockerfile.
 version: 2
 updates:
   - package-ecosystem: gomod

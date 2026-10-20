@@ -1,6 +1,6 @@
 module github.com/drewstreib/prometheus-plex-exporter
 
-go 1.27.0
+go 1.27.3
 
 require (
 	github.com/go-kit/log v0.2.1

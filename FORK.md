@@ -36,11 +36,15 @@ Measured 2026-08-29 with `govulncheck -mode=binary` against the actual shipped a
 |---|---|
 | v1.0.0 (go1.23.12, websocket 1.5.0) | **27** — 26 stdlib, 1 module |
 | v1.1.0 (go1.27.0, websocket 1.5.3) | **0** |
+| v3.1.0 (go1.27.0), rescanned 2026-10-19 | **9** — all stdlib (`net/http`, `http2`, `crypto/tls`, `net/textproto`), disclosed after release, fixed in go1.27.2 |
+| v3.1.1 (go1.27.3) | **0** |
 
 ⚠ **Source-mode `govulncheck ./...` alone would NEVER have shown 26 of those** — it reports module
 vulns, not the stdlib you linked. `-mode=binary` on the built artifact is the only check that sees
 the toolchain. Both run in CI (`vuln` job), plus a weekly cron so newly-disclosed CVEs surface in
-code that has not changed. `go.mod` declares `go 1.27.0`, so an older toolchain refuses to build.
+code that has not changed. `go.mod`'s `go` directive is both the build floor and the toolchain CI
+installs (`go-version-file`). ⚠ **Bump it and the Dockerfile builder together, by hand** — Dependabot
+cannot move the `go` directive (dependabot-core#9527), so a red weekly `vuln` run IS the trigger.
 
 ## Our fixes beyond upstream
 

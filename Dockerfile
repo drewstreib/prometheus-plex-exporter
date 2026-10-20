@@ -6,24 +6,23 @@
 # cmd/prometheus-plex-exporter/Dockerfile, so the published image is always whatever arch the runner
 # was -- amd64, forever. This cross-compiles INSIDE buildx off $TARGETARCH, so one
 # `docker buildx build --platform linux/amd64,linux/arm64` emits a real manifest list.
-# ⚠ Upstream files are untouched by design (this is additive) -- `make docker-images` still works
-# exactly as it did, and `git diff upstream/main` stays merge-trivial.
-#
 # ⚠ Builds with -mod=mod, NOT the checked-in vendor/. Dependabot updates go.mod+go.sum but cannot run
-# `go mod vendor`, so a vendored build would silently go stale on every bump PR. vendor/ is upstream's
-# and is UNUSED here -- editing it changes nothing about this image.
+# `go mod vendor`, so a vendored build would silently go stale on every bump PR. vendor/ is deleted and
+# gitignored (FORK.md -> Severance); don't reintroduce it.
 #
 # ⚠ The BUILDER TOOLCHAIN IS A SECURITY CONTROL, not a compatibility knob. This binary is statically
 # linked, so every net/http, crypto/tls and crypto/x509 fix ships only by REBUILDING ON A NEWER GO.
 # Upstream's go1.23 was two majors past EOL: govulncheck -mode=binary on the shipped v1.0.0 artifact
 # found 27 reachable vulns, 26 of them stdlib. On go1.27 + websocket 1.5.3 the same scan finds ZERO.
-# ⇒ Keep this at the current Go release; Dependabot proposes the bump, the quarterly patrol enforces it.
+# ⇒ Keep this at the current Go release, moved IN THE SAME COMMIT as go.mod's `go` directive (CI scans
+#   with that one). ⚠ Bumped by hand: Dependabot is inert here (.github/dependabot.yml), and even when on
+#   it never moves `go` (dependabot-core#9527). Trigger = the weekly CI `vuln` cron going red.
 #
 # ⚠ The Makefile's `-X main.Version/Revision/Branch` ldflags are dropped: no such vars exist in
 # cmd/prometheus-plex-exporter/main.go, and the Go linker ignores -X for a missing symbol. They were
 # always no-ops; omitting them changes no bytes of behaviour.
 
-FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine3.24 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
