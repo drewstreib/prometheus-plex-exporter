@@ -15,8 +15,8 @@
 # Upstream's go1.23 was two majors past EOL: govulncheck -mode=binary on the shipped v1.0.0 artifact
 # found 27 reachable vulns, 26 of them stdlib. On go1.27 + websocket 1.5.3 the same scan finds ZERO.
 # ⇒ Keep this at the current Go release, moved IN THE SAME COMMIT as go.mod's `go` directive (CI scans
-#   with that one). ⚠ Bumped by hand: Dependabot is inert here (.github/dependabot.yml), and even when on
-#   it never moves `go` (dependabot-core#9527). Trigger = the weekly CI `vuln` cron going red.
+#   with that one). ⚠ Dependabot's docker ecosystem may bump this line but never `go` (dependabot-core
+#   #9527) -- pair them by hand. Trigger = the weekly CI `vuln` cron going red.
 #
 # ⚠ The Makefile's `-X main.Version/Revision/Branch` ldflags are dropped: no such vars exist in
 # cmd/prometheus-plex-exporter/main.go, and the Go linker ignores -X for a missing symbol. They were
