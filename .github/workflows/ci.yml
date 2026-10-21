@@ -24,7 +24,7 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go build -mod=mod -o ./bin/prometheus-plex-exporter ./cmd/prometheus-plex-exporter
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: govulncheck (source)
