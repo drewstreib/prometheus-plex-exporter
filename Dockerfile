@@ -22,7 +22,7 @@
 # cmd/prometheus-plex-exporter/main.go, and the Go linker ignores -X for a missing symbol. They were
 # always no-ops; omitting them changes no bytes of behaviour.
 
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.24 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
